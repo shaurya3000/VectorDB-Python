@@ -23,8 +23,13 @@ def distance(a, b, metric="cosine"):
 
 
 class VectorDB:
-    def __init__(self, dims=16):
+    def __init__(self, dims=16, expansion_search=64):
+        if not isinstance(dims, int) or isinstance(dims, bool) or dims < 1:
+            raise ValueError("Dimensions must be a positive integer")
+
         self.dims = dims
+        self.expansion_search = self._validate_expansion(expansion_search)
+
         self.items = {}
         self.next_id = 1
 
@@ -37,9 +42,28 @@ class VectorDB:
             metric="cos",
             connectivity=16,
             expansion_add=128,
-            expansion_search=64,
+            expansion_search=self.expansion_search,
             dtype="f32"
         )
+
+    @staticmethod
+    def _validate_expansion(value):
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 1
+        ):
+            raise ValueError(
+                "Search expansion must be a positive integer"
+            )
+        return value
+
+    def set_search_expansion(self, value):
+        value = self._validate_expansion(value)
+
+        # USearch supports changing this attribute on the existing index.
+        self.hnsw.expansion_search = value
+        self.expansion_search = value
 
     def insert(self, metadata, category, embedding):
         embedding = np.asarray(embedding, dtype=np.float32)
@@ -53,7 +77,6 @@ class VectorDB:
             raise ValueError("Embedding contains invalid values")
 
         item_id = self.next_id
-        self.next_id += 1
 
         item = {
             "id": item_id,
@@ -68,10 +91,11 @@ class VectorDB:
             self.hnsw.add(item_id, embedding)
         except Exception:
             del self.items[item_id]
-            self.next_id -= 1
             raise
 
+        self.next_id += 1
         self._rebuild_kdtree()
+
         return item_id
 
     def _rebuild_kdtree(self):
@@ -90,7 +114,6 @@ class VectorDB:
         if item_id not in self.items:
             return False
 
-        # Remove from HNSW as well as the item store.
         self.hnsw.remove(item_id)
         del self.items[item_id]
 
@@ -114,8 +137,8 @@ class VectorDB:
         if not np.all(np.isfinite(query)):
             raise ValueError("Query contains invalid values")
 
-        if k < 1:
-            raise ValueError("k must be at least 1")
+        if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+            raise ValueError("k must be a positive integer")
 
         if metric not in ("cosine", "euclidean", "manhattan"):
             raise ValueError("Unsupported distance metric")
@@ -123,21 +146,29 @@ class VectorDB:
         if algorithm not in ("hnsw", "kdtree", "bruteforce"):
             raise ValueError("Unsupported search algorithm")
 
-        start = time.perf_counter()
+        # HNSW is configured for cosine; KD-Tree is used for Euclidean.
+        if algorithm == "hnsw" and metric != "cosine":
+            effective_algorithm = "bruteforce"
+        elif algorithm == "kdtree" and metric != "euclidean":
+            effective_algorithm = "bruteforce"
+        else:
+            effective_algorithm = algorithm
 
         if not self.items:
             return {
                 "hits": [],
                 "latency_us": 0.0,
                 "algorithm": algorithm,
+                "effective_algorithm": effective_algorithm,
                 "metric": metric
             }
+
+        start = time.perf_counter()
 
         count = min(k, len(self.items))
         candidates = []
 
-        if algorithm == "hnsw" and metric == "cosine":
-            # USearch returns a Matches object; its keys are vector IDs.
+        if effective_algorithm == "hnsw":
             matches = self.hnsw.search(query, count)
             keys = matches.keys if hasattr(matches, "keys") else matches
 
@@ -156,7 +187,7 @@ class VectorDB:
 
             candidates.sort(key=lambda pair: pair[0])
 
-        elif algorithm == "kdtree" and metric == "euclidean":
+        elif effective_algorithm == "kdtree":
             distances, indices = self.kdtree.query(
                 query.reshape(1, -1),
                 k=count
@@ -164,14 +195,10 @@ class VectorDB:
 
             candidates = [
                 (float(dist), self.kd_ids[int(index)])
-                for dist, index in zip(
-                    distances[0], indices[0]
-                )
+                for dist, index in zip(distances[0], indices[0])
             ]
 
         else:
-            # Exact ranking for Brute Force and for metrics
-            # other than cosine when HNSW is selected.
             candidates = [
                 (
                     distance(query, item["embedding"], metric),
@@ -196,11 +223,13 @@ class VectorDB:
             "hits": hits,
             "latency_us": round(elapsed, 2),
             "algorithm": algorithm,
+            "effective_algorithm": effective_algorithm,
             "metric": metric
         }
 
     def benchmark(self, query, k=5, metric="cosine"):
         results = {}
+        effective_algorithms = {}
 
         for algorithm in ("bruteforce", "kdtree", "hnsw"):
             result = self.search(
@@ -209,8 +238,13 @@ class VectorDB:
                 metric=metric,
                 algorithm=algorithm
             )
-            results[algorithm] = result["latency_us"]
 
+            results[algorithm] = result["latency_us"]
+            effective_algorithms[algorithm] = (
+                result["effective_algorithm"]
+            )
+
+        results["effective_algorithms"] = effective_algorithms
         return results
 
 
@@ -222,6 +256,10 @@ if __name__ == "__main__":
     db.insert("C", "cs", [0.9, 0.1, 0, 0])
 
     query = [1, 0, 0, 0]
+
+    print("Initial HNSW expansion:", db.expansion_search)
+    db.set_search_expansion(128)
+    print("Updated HNSW expansion:", db.expansion_search)
 
     for algorithm in ("bruteforce", "kdtree", "hnsw"):
         result = db.search(

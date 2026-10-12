@@ -326,7 +326,7 @@ button {
 // ════════════════════════════════════════════════════════════
 //  CONSTANTS
 // ════════════════════════════════════════════════════════════
-const API  = 'http://127.0.0.1:8080';
+const API  = '';
 const DIMS = 16;
 const COL  = { cs:'#00d9ff', math:'#b388ff', food:'#ffb74d', sports:'#69f0ae', doc:'#a6e3a1', default:'#90a4ae' };
 const DIM_COL = ['#00d9ff','#00d9ff','#00d9ff','#00d9ff','#b388ff','#b388ff','#b388ff','#b388ff',
@@ -529,26 +529,59 @@ function setAlgo(el) {
 }
 
 async function runSearch() {
-  const text=document.getElementById('qInput').value.trim(); if(!text)return;
-  const emb=textToEmbedding(text),k=parseInt(document.getElementById('kSlider').value);
-  const metric=document.getElementById('metric').value;
-  const url=`${API}/search?v=${emb.join(',')}&k=${k}&metric=${metric}&algo=${selAlgo}`;
+  const text = document.getElementById('qInput').value.trim();
+  if (!text) return;
+
+  const emb = textToEmbedding(text);
+  const k = parseInt(document.getElementById('kSlider').value, 10);
+  const metric = document.getElementById('metric').value;
+  const params = new URLSearchParams({
+    v: emb.join(','), k: String(k), metric, algo: selAlgo
+  });
+
   try {
-    const r=await fetch(url), data=await r.json();
-    searchResults=data.results||[]; hitIds=new Set(searchResults.map(r=>r.id));
-    const us=data.latencyUs||0;
-    document.getElementById('latBig').textContent=us<1000?us+' μs':(us/1000).toFixed(2)+' ms';
-    document.getElementById('latSub').textContent=selAlgo.toUpperCase()+'  ·  '+metric+'  ·  k='+k;
-    if (searchResults.length>0){
-      let sx=0,sy=0,sw=0;
-      for (let i=0;i<Math.min(3,searchResults.length);i++){
-        const pt=pcaPoints.find(p=>p.item.id===searchResults[i].id);
-        if(pt){const w=1/(i+1);sx+=pt.x*w;sy+=pt.y*w;sw+=w;}
+    const response = await fetch(`${API}/search?${params.toString()}`);
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+
+    searchResults = data.results || [];
+    hitIds = new Set(searchResults.map(item => item.id));
+
+    const latencyUs = Number(data.latencyUs) || 0;
+    document.getElementById('latBig').textContent = latencyUs < 1000
+      ? `${latencyUs.toFixed(1)} μs`
+      : `${(latencyUs / 1000).toFixed(2)} ms`;
+
+    // effectiveAlgorithm is supplied by the backend and identifies the code path used.
+    const effective = data.effectiveAlgorithm || selAlgo;
+    const fallbackNote = effective !== selAlgo
+      ? ` → ${effective.toUpperCase()} (exact fallback)`
+      : '';
+    document.getElementById('latSub').textContent =
+      `${selAlgo.toUpperCase()}${fallbackNote} · ${metric} · k=${k}`;
+
+    if (searchResults.length > 0) {
+      let sx = 0, sy = 0, sw = 0;
+      for (let i = 0; i < Math.min(3, searchResults.length); i++) {
+        const point = pcaPoints.find(p => p.item.id === searchResults[i].id);
+        if (point) {
+          const weight = 1 / (i + 1);
+          sx += point.x * weight;
+          sy += point.y * weight;
+          sw += weight;
+        }
       }
-      if(sw>0)queryPt={x:sx/sw+(Math.random()-.5)*.015,y:sy/sw+(Math.random()-.5)*.015};
+      if (sw > 0) queryPt = { x: sx / sw, y: sy / sw };
+    } else {
+      queryPt = null;
     }
-    renderResults(searchResults); drawVecChart(emb);
-  } catch(_){alert('Cannot reach server — is it running on :8080?');}
+
+    renderResults(searchResults);
+    drawVecChart(emb);
+  } catch (error) {
+    console.error('Search failed:', error);
+    alert(`Search failed: ${error.message}`);
+  }
 }
 
 document.getElementById('qInput').addEventListener('keydown',e=>{if(e.key==='Enter')runSearch();});
@@ -586,33 +619,54 @@ function drawVecChart(emb) {
 }
 
 async function runBenchmark() {
-  const text=document.getElementById('qInput').value.trim()||'binary tree algorithm';
-  const emb=textToEmbedding(text),metric=document.getElementById('metric').value;
+  const text = document.getElementById('qInput').value.trim() || 'binary tree algorithm';
+  const emb = textToEmbedding(text);
+  const metric = document.getElementById('metric').value;
+
   try {
-    const r=await fetch(`${API}/benchmark?v=${emb.join(',')}&k=5&metric=${metric}`);
-    const d=await r.json();
-    document.getElementById('benchSec').style.display='block';
-    const mx=Math.max(d.bruteforceUs,d.kdtreeUs,d.hnswUs,1);
-    document.getElementById('benchBars').innerHTML=[
-      {lbl:'Brute Force',us:d.bruteforceUs,col:'#f38ba8'},
-      {lbl:'KD-Tree',    us:d.kdtreeUs,    col:'#89dceb'},
-      {lbl:'HNSW',       us:d.hnswUs,      col:'#b388ff'},
-    ].map(({lbl,us,col})=>{
-      const pct=Math.max((us/mx)*100,2),disp=us<1000?us+' μs':(us/1000).toFixed(2)+' ms';
-      return `<div class="brow"><div class="blabel"><span style="color:${col}">${lbl}</span><span style="color:var(--muted)">${disp}</span></div><div class="btrack"><div class="bfill" style="width:${pct}%;background:${col}"></div></div></div>`;
+    const response = await fetch(`${API}/benchmark?v=${emb.join(',')}&k=5&metric=${encodeURIComponent(metric)}`);
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+
+    document.getElementById('benchSec').style.display = 'block';
+    const entries = [
+      { key: 'bruteforce', label: 'Brute Force', us: Number(data.bruteforceUs) || 0, color: '#f38ba8' },
+      { key: 'kdtree', label: 'KD-Tree', us: Number(data.kdtreeUs) || 0, color: '#89dceb' },
+      { key: 'hnsw', label: 'HNSW', us: Number(data.hnswUs) || 0, color: '#b388ff' }
+    ];
+    const maxUs = Math.max(...entries.map(entry => entry.us), 1);
+    const effective = data.effectiveAlgorithms || {};
+
+    document.getElementById('benchBars').innerHTML = entries.map(entry => {
+      const actual = effective[entry.key] || entry.key;
+      const label = actual !== entry.key
+        ? `${entry.label} → ${actual.toUpperCase()} (exact fallback)`
+        : entry.label;
+      const pct = Math.max((entry.us / maxUs) * 100, 2);
+      const display = entry.us < 1000 ? `${entry.us.toFixed(1)} μs` : `${(entry.us / 1000).toFixed(2)} ms`;
+      return `<div class="brow"><div class="blabel"><span style="color:${entry.color}">${label}</span><span style="color:var(--muted)">${display}</span></div><div class="btrack"><div class="bfill" style="width:${pct}%;background:${entry.color}"></div></div></div>`;
     }).join('');
-  } catch(_) {}
+  } catch (error) {
+    console.error('Benchmark failed:', error);
+    alert(`Benchmark failed: ${error.message}`);
+  }
 }
 
 async function loadHNSW() {
+  const container = document.getElementById('layers');
   try {
-    const r=await fetch(API+'/hnsw-info'), d=await r.json();
-    const maxN=d.nodesPerLayer[0]||1;
-    document.getElementById('layers').innerHTML=d.nodesPerLayer.map((cnt,lyr)=>{
-      const pct=Math.max((cnt/maxN)*100,2),edg=d.edgesPerLayer[lyr]||0;
-      return `<div class="lrow"><div class="lnum">L${lyr}</div><div class="ltrack"><div class="lfill" style="width:${pct}%"></div></div><div class="lcount">${cnt}n · ${edg}e</div></div>`;
-    }).join('')||'<div style="color:var(--muted);font-size:11px">Empty</div>';
-  } catch(_) {}
+    const response = await fetch(API + '/hnsw-info');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    container.innerHTML =
+      `<div style="color:var(--text);font-size:11px;line-height:1.7">` +
+      `<div>Indexed vectors: <strong>${Number(data.nodeCount) || 0}</strong></div>` +
+      `<div style="color:var(--muted);margin-top:6px">${data.graphNote || 'Index metadata only; graph edges are unavailable.'}</div>` +
+      `</div>`;
+  } catch (error) {
+    console.error('HNSW status failed:', error);
+    container.textContent = 'Could not load index status.';
+  }
 }
 
 async function addVector() {
