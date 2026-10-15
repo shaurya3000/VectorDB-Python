@@ -356,6 +356,3 @@ The embedding model and generation model serve different purposes. If you change
 
 ---
 
-## License
-
-Add or update this section to match the license file included in the repository. Do not assume a license unless one is actually provided.
